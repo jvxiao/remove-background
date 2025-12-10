@@ -64,7 +64,7 @@ def read_root():
 
 
 @app.post("/remove-background")
-async def remove_background(request: Request, file: UploadFile = File(...), model: str = Form(None)):
+async def remove_background(request: Request, file: UploadFile = File(...), model: str = Form('u2net')):
     """接收 multipart/form-data 的文件并返回去除背景后的 PNG 图像流（带透明通道）。
 
     可选的表单字段/查询参数：
