@@ -1,10 +1,21 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Form
 from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 from rembg import remove, new_session
 import io
 import os
 from typing import Optional
+
+origins = [
+    # "http://localhost",          # 本地前端地址
+    # "http://localhost:8080",     # 前端常用端口
+    # "http://127.0.0.1:5500",     # 静态文件服务器端口
+    # "https://your-production-domain.com",  # 生产环境域名
+    "*"
+]
+
+
 
 # Simple in-memory cache of rembg sessions keyed by model name or model file path
 SESSIONS: dict[str, object] = {}
@@ -38,6 +49,14 @@ async def get_session(model: Optional[str]):
 
 app = FastAPI(title="Background Remover")
 
+# 添加CORS中间件
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,        # 允许的源列表
+    allow_credentials=True,       # 是否允许携带Cookie
+    allow_methods=["*"],          # 允许所有HTTP方法（GET/POST/PUT/DELETE等）
+    allow_headers=["*"],          # 允许所有请求头
+)
 
 @app.get("/")
 def read_root():
@@ -78,7 +97,14 @@ async def remove_background(request: Request, file: UploadFile = File(...), mode
 
         output_bytes = await run_in_threadpool(process)
 
-        return StreamingResponse(io.BytesIO(output_bytes), media_type="image/png")
+        return StreamingResponse(io.BytesIO(output_bytes), media_type="image/jpeg")
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    # 读取环境变量PORT，默认8000
+    port = int(os.getenv("PORT", 8080))
+    # 必须绑定0.0.0.0，否则云平台无法访问
+    uvicorn.run(app, host="0.0.0.0", port=port)
