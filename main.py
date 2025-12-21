@@ -33,8 +33,19 @@ async def get_session(model: Optional[str]):
     if not model:
         return None
 
-    # If model refers to an existing local file/path, use its absolute path as cache key
-    key = os.path.abspath(model) if os.path.exists(model) else model
+    # If model is a simple name, prefer a local file under ./models/{name}.onnx to avoid remote download
+    MODELS_DIR = os.getenv('MODELS_DIR', os.path.join(os.getcwd(), 'models'))
+    candidate_local = None
+    if not os.path.isabs(model) and not os.path.exists(model):
+        # look for ./models/{model}.onnx
+        candidate = os.path.join(MODELS_DIR, f"{model}.onnx")
+        if os.path.exists(candidate):
+            candidate_local = candidate
+            print(f"Found local model for '{model}': {candidate_local} - will use local file")
+
+    # If model refers to an existing local file/path (or we found a local candidate), use its absolute path as cache key
+    resolved_model = candidate_local or model
+    key = os.path.abspath(resolved_model) if os.path.exists(resolved_model) else resolved_model
 
     # fast path: already created
     if key in SESSIONS:
@@ -56,9 +67,16 @@ async def get_session(model: Optional[str]):
             # lazy import rembg.new_session to avoid heavy imports on startup
             rembg = importlib.import_module('rembg')
             new_session = getattr(rembg, 'new_session')
-            print(f"Loading rembg model/session for '{model}'...")
-            # new_session accepts a model name or a local model path
-            return new_session(model)
+            # print whether we're loading a local model path or a named model
+            if os.path.exists(resolved_model):
+                print(f"Loading rembg session from local model file: {resolved_model}")
+            else:
+                print(f"Loading rembg session for model name: {resolved_model}")
+            # If resolved_model is a local file, pass it as model_path to new_session
+            if os.path.exists(resolved_model):
+                return new_session(model_path=resolved_model)
+            # otherwise pass model name
+            return new_session(resolved_model)
 
         session = await run_in_threadpool(create)
         SESSIONS[key] = session
