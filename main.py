@@ -2,11 +2,11 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Form
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
-from rembg import remove, new_session
 import io
 import os
 from typing import Optional
 import asyncio
+import importlib
 
 origins = [
     # "http://localhost",          # 本地前端地址
@@ -53,8 +53,11 @@ async def get_session(model: Optional[str]):
             return SESSIONS[key]
 
         def create():
-            # new_session accepts a model name or a local model path
+            # lazy import rembg.new_session to avoid heavy imports on startup
+            rembg = importlib.import_module('rembg')
+            new_session = getattr(rembg, 'new_session')
             print(f"Loading rembg model/session for '{model}'...")
+            # new_session accepts a model name or a local model path
             return new_session(model)
 
         session = await run_in_threadpool(create)
@@ -106,8 +109,11 @@ async def remove_background(request: Request, file: UploadFile = File(...), mode
     try:
         # rembg.remove 是 CPU 密集型操作，放到线程池中运行以免阻塞事件循环
         def process():
+            rembg = importlib.import_module('rembg')
             # 如果我们已有一个 session（来自 new_session），则使用 session
             if session is not None:
+                # lazy import remove
+                remove = getattr(rembg, 'remove')
                 return remove(input_bytes, session=session)
 
             # 如果提供了 model，但没有创建 session（例如用户传了模型名而不需要 session），
@@ -118,9 +124,13 @@ async def remove_background(request: Request, file: UploadFile = File(...), mode
                     model_arg = os.path.abspath(model)
                 else:
                     model_arg = model
+                rembg = importlib.import_module('rembg')
+                remove = getattr(rembg, 'remove')
                 return remove(input_bytes, model_name=model_arg)
 
             # 未指定模型：调用 remove 不传 session 或 model_name，避免重复创建会话
+            rembg = importlib.import_module('rembg')
+            remove = getattr(rembg, 'remove')
             return remove(input_bytes)
 
         output_bytes = await run_in_threadpool(process)
