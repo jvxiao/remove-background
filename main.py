@@ -6,6 +6,7 @@ from rembg import remove, new_session
 import io
 import os
 from typing import Optional
+import asyncio
 
 origins = [
     # "http://localhost",          # 本地前端地址
@@ -19,6 +20,7 @@ origins = [
 
 # Simple in-memory cache of rembg sessions keyed by model name or model file path
 SESSIONS: dict[str, object] = {}
+_SESSION_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 async def get_session(model: Optional[str]):
@@ -33,18 +35,33 @@ async def get_session(model: Optional[str]):
 
     # If model refers to an existing local file/path, use its absolute path as cache key
     key = os.path.abspath(model) if os.path.exists(model) else model
+
+    # fast path: already created
     if key in SESSIONS:
         return SESSIONS[key]
 
-    # Create the session in a thread to avoid blocking the event loop
-    def create():
-        # new_session accepts a model name or a local model path
-        print(f"Loading rembg model/session for '{model}'...")
-        return new_session(model, model_path=model)
+    # ensure a single creator per key using asyncio.Lock
+    lock = _SESSION_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _SESSION_LOCKS[key] = lock
 
-    session = await run_in_threadpool(create)
-    SESSIONS[key] = session
-    return session
+    await lock.acquire()
+    try:
+        # another coroutine may have created it while we waited
+        if key in SESSIONS:
+            return SESSIONS[key]
+
+        def create():
+            # new_session accepts a model name or a local model path
+            print(f"Loading rembg model/session for '{model}'...")
+            return new_session(model)
+
+        session = await run_in_threadpool(create)
+        SESSIONS[key] = session
+        return session
+    finally:
+        lock.release()
 
 
 app = FastAPI(title="Background Remover")
@@ -64,19 +81,21 @@ def read_root():
 
 
 @app.post("/remove-background")
-async def remove_background(request: Request, file: UploadFile = File(...), model: str = Form('u2net')):
+async def remove_background(request: Request, file: UploadFile = File(...), model: Optional[str] = Form(None)):
     """接收 multipart/form-data 的文件并返回去除背景后的 PNG 图像流（带透明通道）。
 
     可选的表单字段/查询参数：
     - model: 指定 rembg 使用的模型名称或本地模型路径（例如 'u2net', 'u2net_human_seg' 等）。
       支持通过表单字段上传：-F "model=u2net" 或通过查询参数：/remove-background?model=u2net
     """
-    # 如果没有通过表单提供 model，尝试从查询参数读取
-    print(model)
+    # 如果没有通过表单提供 model，尝试从查询参数读取；如果仍为 None 则使用默认模型（env DEFAULT_MODEL 或 'u2net'）
     if not model:
         model = request.query_params.get("model")
 
-    # 为指定的模型创建或复用一个 session（如果提供了 model）
+    if not model:
+        model = os.getenv("DEFAULT_MODEL", "u2net")
+
+    # 为模型创建或复用一个 session（默认也会创建一次并缓存），避免多次重复加载
     session = await get_session(model)
 
     if not file.content_type.startswith("image/"):
@@ -90,14 +109,24 @@ async def remove_background(request: Request, file: UploadFile = File(...), mode
             # 如果我们已有一个 session（来自 new_session），则使用 session
             if session is not None:
                 return remove(input_bytes, session=session)
-            # 否则将 model_name（如果提供）传递给 remove，最后回退到默认模型
+
+            # 如果提供了 model，但没有创建 session（例如用户传了模型名而不需要 session），
+            # 将按 rembg 要求传递 model_name（如果看起来像本地路径则传路径，否则传模型名）
             if model:
-                return remove(input_bytes, model_name="./models/"+model+".onnx")
+                # 如果是本地文件路径，传入绝对路径；否则传模型名给 rembg
+                if os.path.exists(model):
+                    model_arg = os.path.abspath(model)
+                else:
+                    model_arg = model
+                return remove(input_bytes, model_name=model_arg)
+
+            # 未指定模型：调用 remove 不传 session 或 model_name，避免重复创建会话
             return remove(input_bytes)
 
         output_bytes = await run_in_threadpool(process)
 
-        return StreamingResponse(io.BytesIO(output_bytes), media_type="image/jpeg")
+        # rembg 输出通常为 PNG with alpha channel
+        return StreamingResponse(io.BytesIO(output_bytes), media_type="image/png")
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
