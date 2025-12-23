@@ -8,6 +8,10 @@ from typing import Optional
 import asyncio
 import importlib
 
+# Directory to look for local models and offline mode flag
+MODELS_DIR = os.getenv('MODELS_DIR', os.path.join(os.getcwd(), 'models'))
+MODELS_OFFLINE = os.getenv('MODELS_OFFLINE', '0').lower() in ('1', 'true', 'yes')
+
 origins = [
     # "http://localhost",          # 本地前端地址
     # "http://localhost:8080",     # 前端常用端口
@@ -34,7 +38,7 @@ async def get_session(model: Optional[str]):
         return None
 
     # If model is a simple name, prefer a local file under ./models/{name}.onnx to avoid remote download
-    MODELS_DIR = os.getenv('MODELS_DIR', os.path.join(os.getcwd(), 'models'))
+    # MODELS_DIR is defined at module level
     candidate_local = None
     if not os.path.isabs(model) and not os.path.exists(model):
         # look for ./models/{model}.onnx
@@ -45,6 +49,9 @@ async def get_session(model: Optional[str]):
 
     # If model refers to an existing local file/path (or we found a local candidate), use its absolute path as cache key
     resolved_model = candidate_local or model
+    # If offline mode is required but there's no local model file, fail early to avoid rembg downloading from GitHub
+    if MODELS_OFFLINE and not os.path.exists(resolved_model):
+        raise FileNotFoundError(f"Local model for '{model}' not found in {MODELS_DIR} and MODELS_OFFLINE is enabled")
     key = os.path.abspath(resolved_model) if os.path.exists(resolved_model) else resolved_model
 
     # fast path: already created
@@ -116,8 +123,14 @@ async def remove_background(request: Request, file: UploadFile = File(...), mode
     if not model:
         model = os.getenv("DEFAULT_MODEL", "u2net")
 
+    # Normalize model representation (absolute local path if present, or stable model name)
+    model = normalize_model_input(model)
+
     # 为模型创建或复用一个 session（默认也会创建一次并缓存），避免多次重复加载
-    session = await get_session(model)
+    try:
+        session = await get_session(model)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Uploaded file must be an image")
@@ -158,6 +171,30 @@ async def remove_background(request: Request, file: UploadFile = File(...), mode
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+def normalize_model_input(model: Optional[str]) -> Optional[str]:
+    """Normalize model input to either an absolute local path (if exists) or a stable model name.
+
+    This ensures the cache key used by get_session is stable between requests even if callers
+    pass different forms like './models/u2net.onnx', 'u2net', or '/home/www/models/u2net.onnx'.
+    """
+    if not model:
+        return None
+    # expanduser and normalize slashes
+    m = os.path.expanduser(model)
+    # if looks like a local file, return its absolute realpath
+    if os.path.isabs(m) and os.path.exists(m):
+        return os.path.realpath(m)
+    # relative path
+    rel = os.path.join(os.getcwd(), m)
+    if os.path.exists(rel):
+        return os.path.realpath(rel)
+    # check MODELS_DIR for name
+    candidate = os.path.join(MODELS_DIR, f"{m}.onnx")
+    if os.path.exists(candidate):
+        return os.path.realpath(candidate)
+    # fallback to the original model string (stable)
+    return m
 
 if __name__ == "__main__":
     import uvicorn
