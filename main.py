@@ -14,6 +14,7 @@ import time
 # Directory to look for local models and offline mode flag
 MODELS_DIR = os.getenv('MODELS_DIR', os.path.join(os.getcwd(), 'models'))
 MODELS_OFFLINE = os.getenv('MODELS_OFFLINE', '0').lower() in ('1', 'true', 'yes')
+RESULTS_TTL_SECONDS = int(os.getenv('RESULTS_TTL_SECONDS', '120'))
 
 origins = [
     # "http://localhost",          # 本地前端地址
@@ -173,6 +174,25 @@ async def task_worker():
             CURRENT_TASK_ID = None
             TASK_QUEUE.task_done()
 
+
+async def cleanup_results_worker():
+    if RESULTS_TTL_SECONDS <= 0:
+        return
+    while True:
+        now = time.time()
+        expired_ids = []
+        for task_id, meta in list(TASK_METADATA.items()):
+            if meta.get("status") != "done":
+                continue
+            finished_at = meta.get("finished_at")
+            if not finished_at:
+                continue
+            if now - finished_at > RESULTS_TTL_SECONDS:
+                expired_ids.append(task_id)
+        for task_id in expired_ids:
+            TASK_RESULTS.pop(task_id, None)
+        await asyncio.sleep(RESULTS_TTL_SECONDS)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,        # 允许的源列表
@@ -185,6 +205,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def on_startup():
     asyncio.create_task(task_worker())
+    asyncio.create_task(cleanup_results_worker())
 
 
 @app.get("/")
